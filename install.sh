@@ -174,6 +174,13 @@ esac
 command -v pacman >/dev/null || die "pacman is not installed; this is not an Arch-based system."
 command -v sudo >/dev/null || die "sudo is not installed."
 
+# Before the first sudo below, so the one password prompt this run needs lands
+# here rather than somewhere inside makepkg's output an hour from now.
+source "$CHECKOUT/install/arm/sudo-keepalive.sh"
+OMARCHY_ARM_DRY_RUN="$DRY_RUN" omarchy_arm_sudo_keepalive_start ||
+  die "sudo could not authenticate you, and this install needs it throughout."
+trap 'omarchy_arm_sudo_keepalive_stop' EXIT
+
 # A pacstrapped Arch Linux ARM system can arrive without its own keyring, in
 # which case every single package below would fail verification. Catch it here
 # rather than 200 signature errors into the install.
@@ -343,7 +350,7 @@ reload_guard() {
 }
 
 reload_guard pause
-trap 'reload_guard resume' EXIT
+trap 'reload_guard resume; omarchy_arm_sudo_keepalive_stop' EXIT
 
 
 if [[ $CHECKOUT == "$TARGET" ]]; then
@@ -496,6 +503,7 @@ step "Done"
 ########################################################################
 
 reload_guard resume
+omarchy_arm_sudo_keepalive_stop
 trap - EXIT
 
 

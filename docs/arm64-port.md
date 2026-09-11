@@ -289,6 +289,9 @@ Seven test files cover this fork specifically, 106 assertions in all:
   stubbed sandbox and asserts that it reaches neither `sudo` nor a mutating
   `pacman`, that it refuses x86_64 and non-Arch distributions, and that the
   boot-chain drop-ins are skipped.
+- `test/shell.d/arm64-sudo-keepalive-test.sh` -- the sudo timestamp is primed
+  once before the first escalation, refreshed for the length of the run, and
+  stopped afterwards; a dry run authenticates nothing.
 - `test/shell.d/arm64-gating-test.sh` -- asserts every x86-only hardware leaf
   is still gated, the pacman.conf restore cannot run on ARM, and the manifests
   have not drifted from the base package list.
