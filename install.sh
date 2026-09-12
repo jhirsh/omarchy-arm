@@ -11,10 +11,12 @@
 #   - a Raspberry Pi 5 under Arch Linux ARM
 #   - an aarch64 virtual machine under Arch Linux ARM
 #
-# Run it as your normal user from a checkout of this repository:
+# Run it from a checkout of this repository, as your normal user or as root on
+# a fresh image, where it creates the user first and carries on as them:
 #
 #   ./install.sh --dry-run     # print the whole plan, change nothing
 #   ./install.sh
+#   ./install.sh --user jonas  # as root: create jonas, then install as jonas
 #
 # See docs/arm64-port.md for what differs from upstream and why.
 
@@ -30,6 +32,8 @@ NO_AUR=0
 LINK_CHECKOUT=0
 TARGET="/usr/share/omarchy"
 FORCED_PLATFORM=""
+NEW_USER=""
+ARGS=("$@")
 
 RED=$'\033[31m'
 GREEN=$'\033[32m'
@@ -56,6 +60,10 @@ Options:
                      desktop needs (the terminal launcher and mise, which
                      installs the AI CLIs). Leaves a degraded desktop
   --target DIR       Where Omarchy is installed (default: $TARGET)
+  --user NAME        When run as root: create NAME with sudo rights, then
+                     re-run this installer as NAME. A fresh Arch Linux ARM
+                     image has no such user, so this is how it gets one.
+                     Prompted for when omitted
   --link             Point the target at this checkout with a symlink instead
                      of copying it, for working on the fork itself
   --profile NAME     Override hardware detection: apple-silicon,
@@ -74,6 +82,7 @@ while (($#)); do
     --link) LINK_CHECKOUT=1; shift ;;
     --target) TARGET="${2:-}"; shift 2 ;;
     --profile) FORCED_PLATFORM="${2:-}"; shift 2 ;;
+    --user) NEW_USER="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
   esac
@@ -137,8 +146,8 @@ step "Preflight"
 (( BASH_VERSINFO[0] >= 5 )) ||
   die "Omarchy needs bash 5 or newer; this shell is $BASH_VERSION."
 
-(( EUID != 0 )) ||
-  die "Run install.sh as your normal user, not as root. It calls sudo where it needs to."
+# Overridable so the test suite can drive the root path without being root.
+euid="${OMARCHY_EUID:-$EUID}"
 
 export PATH="$CHECKOUT/bin:$PATH"
 
@@ -172,7 +181,7 @@ case " $distro_id $distro_like " in
 esac
 
 command -v pacman >/dev/null || die "pacman is not installed; this is not an Arch-based system."
-command -v sudo >/dev/null || die "sudo is not installed."
+(( euid == 0 )) || command -v sudo >/dev/null || die "sudo is not installed."
 
 # The two preconditions this installer cannot supply for itself.
 #
@@ -215,6 +224,75 @@ if [[ -n $mirror ]]; then
        install.sh downloads well over a hundred packages and cannot run offline.
        Bring the network up first: nmcli device wifi connect <ssid>"
   fi
+fi
+
+# Everything from here on runs as a normal user and calls sudo where it needs
+# to; the desktop is installed into that user's home, so root cannot be it. A
+# stock Arch Linux ARM image logs in as root, ships an 'alarm' user with no
+# sudo rights and has no sudo installed, so as root this makes the user it
+# needs and starts over as them instead of refusing.
+if (( euid == 0 )); then
+  if [[ -z $NEW_USER ]]; then
+    (( ASSUME_YES )) && die "Run as root, install.sh needs --user NAME to know who to install for."
+    read -r -p "    Name of the user to install Omarchy for: " NEW_USER
+  fi
+  [[ $NEW_USER =~ ^[a-z_][a-z0-9_-]*$ ]] || die "'$NEW_USER' is not a valid user name."
+
+  # The image's own keyring, so the sudo install below can verify itself.
+  run pacman-key --init
+  run pacman-key --populate archlinuxarm
+  run pacman -Sy --needed --noconfirm sudo
+  if id "$NEW_USER" &>/dev/null; then
+    ok "User $NEW_USER exists"
+  else
+    run useradd -m -G wheel -s /bin/bash "$NEW_USER"
+  fi
+
+  # The user's password, and root's too when root has none yet, as upstream's
+  # first boot sets it. A root password the image was provisioned with (the
+  # arch-linux-arm image takes one from rootpw on the boot partition) is left
+  # alone: that is the image's job, this only fills the gap when it was skipped.
+  if [[ $(passwd -S root 2>/dev/null | awk '{print $2}') == "P" ]]; then
+    root_too=""
+  else
+    root_too=1
+  fi
+  if (( DRY_RUN )); then
+    warn "[dry-run] chpasswd: set a password for $NEW_USER${root_too:+ and for root, which has none}"
+  else
+    read -rs -p "    Password for $NEW_USER${root_too:+ (root has none; it gets the same one)}: " password; echo
+    read -rs -p "    Again: " again; echo
+    [[ -n $password && $password == "$again" ]] || die "The passwords did not match."
+    {
+      printf '%s:%s\n' "$NEW_USER" "$password"
+      [[ -z $root_too ]] || printf 'root:%s\n' "$password"
+    } | chpasswd
+    unset password again
+  fi
+
+  # Same drop-in upstream writes, so the two never disagree.
+  run bash -c "echo '%wheel ALL=(ALL:ALL) ALL' >/etc/sudoers.d/00-omarchy-wheel"
+  run chmod 440 /etc/sudoers.d/00-omarchy-wheel
+
+  # A checkout under /root is unreadable to anyone else, so hand the user a copy
+  # of their own and continue from there.
+  home=$(getent passwd "$NEW_USER" 2>/dev/null | cut -d: -f6) || home=""
+  home="${home:-/home/$NEW_USER}"
+  if [[ $CHECKOUT != "$home"/* ]]; then
+    run cp -a "$CHECKOUT" "$home/"
+    run chown -R "$NEW_USER:" "$home/$(basename "$CHECKOUT")"
+    CHECKOUT="$home/$(basename "$CHECKOUT")"
+  fi
+
+  if (( DRY_RUN )); then
+    warn "Dry run: the rest of the plan needs $NEW_USER to exist. Log in as them and run:"
+    warn "  $CHECKOUT/install.sh --dry-run"
+    exit 0
+  fi
+
+  cmd=("$CHECKOUT/install.sh" "${ARGS[@]}")
+  say "Continuing as $NEW_USER."
+  exec su - "$NEW_USER" -c "${cmd[*]@Q}"
 fi
 
 # Before the first sudo below, so the one password prompt this run needs lands

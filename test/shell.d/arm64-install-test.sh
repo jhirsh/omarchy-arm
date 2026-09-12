@@ -331,3 +331,29 @@ resume_line=$(grep -nE "reload-guard'? '?resume" <<<"$output" | tail -1 | cut -d
 (( resume_line > pause_line )) ||
   fail "the resume comes after the pause" "$output"
 pass "the run brackets every config change with Hyprland's reload guard"
+
+# A stock Arch Linux ARM image logs in as root with no sudo and no usable user.
+# As root the installer makes the user it needs and starts over as them, so a
+# fresh image is one command away rather than a manual useradd first.
+: >"$test_tmp/calls.log"
+as_root=$(OMARCHY_EUID=0 run_install "$arch_arm" --dry-run --user omarchytest) ||
+  fail "install.sh --dry-run as root with --user succeeds" "$as_root"
+grep -qE "useradd'? .*'?omarchytest" <<<"$as_root" ||
+  fail "root creates the named user" "$as_root"
+grep -q "sudoers.d/00-omarchy-wheel" <<<"$as_root" ||
+  fail "root gives wheel sudo rights" "$as_root"
+grep -qE "chown'? '?-R'? '?omarchytest:" <<<"$as_root" ||
+  fail "root hands the user a checkout of their own" "$as_root"
+grep -q "Package plan" <<<"$as_root" &&
+  fail "the root run stops before the per-user plan" "$as_root"
+[[ ! -s $test_tmp/calls.log ]] ||
+  fail "the root run never calls sudo" "$(cat "$test_tmp/calls.log")"
+pass "as root, install.sh creates the user and hands over to them"
+
+no_name=$(OMARCHY_EUID=0 run_install "$arch_arm" --dry-run --yes) &&
+  fail "root with --yes and no --user is refused" "$no_name"
+grep -q -- "--user NAME" <<<"$no_name" ||
+  fail "the refusal names the flag" "$no_name"
+bad_name=$(OMARCHY_EUID=0 run_install "$arch_arm" --dry-run --user "Bad Name") &&
+  fail "an invalid user name is refused" "$bad_name"
+pass "root without a usable user name is refused"
