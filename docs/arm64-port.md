@@ -389,6 +389,7 @@ section. That is the chain Raspberry Pi OS uses. It came up first try, and
 | `sudo` is not in the Arch Linux ARM base image | the installer needs it from its first privileged step |
 | Arch Linux ARM rebuilds Arch's packages one at a time, with no staging | aquamarine was rebuilt with a new soname on a Tuesday and hyprland that links it was not, so for days nothing on any aarch64 mirror satisfied hyprland and pacman threw the whole 120-package transaction away after the prompt. The plan step now resolves the set with `pacman -Sp` first and builds what the repository cannot satisfy from Arch's own recipe at the tag x86_64 ships; the official build replaces it when it lands |
 | A hostname change moves the DHCP lease | the Pi answered on a different address after the rename, then took its old one back at the next boot. Nothing was broken; five minutes were spent proving it |
+| The image joins WiFi through iwd; Omarchy switches to NetworkManager | the image stores each network's secret in `/var/lib/iwd/<SSID>.psk`, and NetworkManager does not read iwd's store. Disabling iwd therefore stranded a WiFi-only board at the first reboot after install, off the network with no way back in short of a keyboard or serial cable. `install/arm/wifi-migrate.sh` now writes a NetworkManager keyfile for each iwd-known network before iwd is disabled, so the board rejoins on its own |
 
 What the board confirmed rather than found:
 

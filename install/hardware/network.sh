@@ -1,3 +1,8 @@
+# Carry any WiFi iwd knows into NetworkManager before iwd is disabled, or a
+# board reached only over WiFi never rejoins after the first reboot.
+source "$OMARCHY_INSTALL/arm/wifi-migrate.sh"
+omarchy_arm_migrate_iwd_wifi
+
 # NetworkManager enablement is centralized in enable-services.sh.
 systemctl disable iwd.service 2>/dev/null || true
 
