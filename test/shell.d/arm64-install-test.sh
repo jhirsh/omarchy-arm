@@ -391,8 +391,12 @@ grep -q "Installing the vendored known-good set" <<<"$stale" &&
   fail "with no lock set pinned, nothing claims to install a vendored bundle" "$stale"
 grep -qE "git'? '?clone.*--branch'? '?0.56.2-2.*packages/hyprland.git" <<<"$stale" ||
   fail "the fallback clones Arch's recipe at the version x86_64 ships" "$stale"
-grep -q "makepkg -si" <<<"$stale" ||
-  fail "the fallback builds and installs the package" "$stale"
+grep -q "makepkg -s " <<<"$stale" ||
+  fail "the fallback builds the package" "$stale"
+grep -qE "pacman -U --needed.*\.pkg\.tar" <<<"$stale" ||
+  fail "the fallback installs what it built" "$stale"
+grep -q "/var/cache/pacman/pkg" <<<"$stale" ||
+  fail "the fallback keeps the built package in the cache so it can be pinned" "$stale"
 stale_line=$(grep -n "cannot satisfy the package set" <<<"$stale" | head -1 | cut -d: -f1 || true)
 install_line=$(grep -n "Repository packages installed" <<<"$stale" | head -1 | cut -d: -f1 || true)
 [[ -n $stale_line && -n $install_line ]] ||
