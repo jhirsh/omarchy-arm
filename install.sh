@@ -122,6 +122,55 @@ bootstrap_aur_helper() {
   rm -rf "$build_dir"
 }
 
+# Build a repository package from Arch's own recipe, at the version x86_64
+# ships today.
+#
+# Arch Linux ARM rebuilds Arch's packages one at a time, with no staging, so
+# when a library bumps its soname the repository contradicts itself for a few
+# days: aquamarine is rebuilt on Tuesday, hyprland that links it on Friday, and
+# in between nothing on any mirror satisfies hyprland. Arch's recipe at its
+# current tag was written against the new library, so building it here is the
+# same job the Arch Linux ARM farm will do, a few days early. pacman replaces
+# the result with the official build when it lands.
+build_from_arch() {
+  local pkg="$1" repo json ver rel epoch tag build_dir
+
+  for repo in extra core; do
+    json=$(curl -fsS --max-time 20 "https://archlinux.org/packages/$repo/x86_64/$pkg/json/" 2>/dev/null) && break
+    json=""
+  done
+  [[ -n $json ]] || die "Arch has no package called '$pkg', so there is no recipe to build it from."
+
+  ver=$(grep -oE '"pkgver": *"[^"]*"' <<<"$json" | cut -d'"' -f4)
+  rel=$(grep -oE '"pkgrel": *"[^"]*"' <<<"$json" | cut -d'"' -f4)
+  epoch=$(grep -oE '"epoch": *[0-9]+' <<<"$json" | grep -oE '[0-9]+$' || true)
+  (( ${epoch:-0} > 0 )) || epoch=""
+  tag="${epoch:+$epoch-}$ver-$rel"
+
+  say "Building $pkg $tag from Arch's recipe. On a Raspberry Pi this takes a while."
+  run sudo pacman -S --needed --noconfirm base-devel git
+  build_dir=$(mktemp -d)
+  run git clone --depth 1 --branch "$tag" \
+    "https://gitlab.archlinux.org/archlinux/packaging/packages/$pkg.git" "$build_dir/$pkg"
+  # Arch's recipes list x86_64 alone, and makepkg refuses any other machine.
+  run sed -i "s/^arch=.*/arch=('aarch64')/" "$build_dir/$pkg/PKGBUILD"
+  run bash -c "cd '$build_dir/$pkg' && makepkg -si --noconfirm"
+  rm -rf "$build_dir"
+}
+
+# Sets stale[] to the packages pacman cannot resolve right now and resolve_error
+# to what it said, both empty when the whole set resolves. pacman -Sp resolves
+# the transaction exactly as an install would and downloads nothing, so this
+# needs no privileges.
+resolve_set() {
+  stale=()
+  if resolve_error=$(pacman -Sp --needed --noconfirm "$@" 2>&1 >/dev/null); then
+    resolve_error=""
+    return 0
+  fi
+  mapfile -t stale < <(grep -oE "required by [^ ]+" <<<"$resolve_error" | awk '{print $3}' | sort -u)
+}
+
 confirm() {
   (( ASSUME_YES || DRY_RUN )) && return 0
 
@@ -417,6 +466,30 @@ else
   done < <(manifest packages.extra)
 
   (( ${#extra_pkgs[@]} > 0 )) && say "Installed by the ISO on x86_64:   ${#extra_pkgs[@]} (${extra_pkgs[*]})"
+
+  # Resolve before asking, so a repository that cannot satisfy its own packages
+  # today is found here and not after the prompt and the sudo password.
+  resolve_set "${repo_pkgs[@]}"
+  if [[ -n $resolve_error ]] && (( ${#stale[@]} == 0 )); then
+    die "pacman cannot resolve the package set:
+       $resolve_error"
+  fi
+  if (( ${#stale[@]} > 0 )); then
+    warn "Arch Linux ARM cannot satisfy these today: ${stale[*]}"
+    while read -r line; do say "  $line"; done < <(grep "unable to satisfy" <<<"$resolve_error" || true)
+    say "A library they link was rebuilt and they were not yet. Building them from Arch's recipe instead."
+    for pkg in "${stale[@]}"; do
+      build_from_arch "$pkg"
+    done
+    if (( ! DRY_RUN )); then
+      resolve_set "${repo_pkgs[@]}"
+      (( ${#stale[@]} == 0 )) ||
+        die "Still unresolvable after building ${stale[*]}:
+       $resolve_error
+       Arch Linux ARM rebuilds packages one at a time after Arch does. Wait a day
+       or two and run ./install.sh again; it picks up where it left off."
+    fi
+  fi
 
   say ""
   confirm "Install ${#repo_pkgs[@]} packages now?" || die "Cancelled."

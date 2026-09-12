@@ -50,6 +50,16 @@ if [[ ${1:-} == "-Si" ]]; then
   grep -qxF "${2:-}" "$STUB_REPO_LIST"
   exit $?
 fi
+# -Sp resolves without installing. STUB_UNRESOLVED names a package the
+# repository cannot satisfy, the way Arch Linux ARM's lagging rebuilds leave it.
+if [[ ${1:-} == "-Sp" ]]; then
+  if [[ -n ${STUB_UNRESOLVED:-} ]]; then
+    echo "error: failed to prepare transaction (could not satisfy dependencies)" >&2
+    echo ":: unable to satisfy dependency 'libaquamarine.so=13-64' required by $STUB_UNRESOLVED" >&2
+    exit 1
+  fi
+  exit 0
+fi
 printf 'pacman %s\n' "$*" >>"$STUB_CALLS"
 SH
 
@@ -70,6 +80,11 @@ SH
 
 cat >"$stub_bin/curl" <<'SH'
 #!/bin/bash
+# The version Arch ships on x86_64, which is the recipe the fallback builds.
+if [[ $* == *archlinux.org/packages/extra/* ]]; then
+  echo '{"pkgname": "hyprland", "pkgver": "0.56.2", "pkgrel": "2", "epoch": 0}'
+  exit 0
+fi
 exit "${STUB_CURL_EXIT:-0}"
 SH
 
@@ -96,6 +111,7 @@ run_install() {
   STUB_REPO_LIST="$test_tmp/repo-list" \
   STUB_CALLS="$test_tmp/calls.log" \
   STUB_CURL_EXIT="${STUB_CURL_EXIT:-0}" \
+  STUB_UNRESOLVED="${STUB_UNRESOLVED:-}" \
   OMARCHY_NOW="${OMARCHY_NOW:-}" \
   OMARCHY_OS_RELEASE="$os_file" \
   OMARCHY_ARCH="${STUB_ARCH:-aarch64}" \
@@ -357,3 +373,23 @@ grep -q -- "--user NAME" <<<"$no_name" ||
 bad_name=$(OMARCHY_EUID=0 run_install "$arch_arm" --dry-run --user "Bad Name") &&
   fail "an invalid user name is refused" "$bad_name"
 pass "root without a usable user name is refused"
+
+# Arch Linux ARM rebuilds Arch's packages one at a time, so a soname bump leaves
+# hyprland unresolvable for a few days. The plan step finds that before the
+# prompt and builds the package from Arch's recipe instead of failing the
+# whole transaction after the password.
+stale=$(STUB_UNRESOLVED=hyprland run_install "$arch_arm" --dry-run) ||
+  fail "an unresolvable package does not fail the dry run" "$stale"
+grep -q "cannot satisfy these today: hyprland" <<<"$stale" ||
+  fail "the plan names the package the repository cannot satisfy" "$stale"
+grep -qE "git'? '?clone.*--branch'? '?0.56.2-2.*packages/hyprland.git" <<<"$stale" ||
+  fail "the fallback clones Arch's recipe at the version x86_64 ships" "$stale"
+grep -q "makepkg -si" <<<"$stale" ||
+  fail "the fallback builds and installs the package" "$stale"
+stale_line=$(grep -n "cannot satisfy these today" <<<"$stale" | head -1 | cut -d: -f1 || true)
+install_line=$(grep -n "Repository packages installed" <<<"$stale" | head -1 | cut -d: -f1 || true)
+[[ -n $stale_line && -n $install_line ]] ||
+  fail "the resolve check and the package install both appear" "$stale"
+(( stale_line < install_line )) ||
+  fail "the resolve check lands before the package transaction" "$stale"
+pass "an unresolvable package is built from Arch's recipe before the package transaction"
