@@ -164,7 +164,10 @@ build_from_arch() {
 # needs no privileges.
 resolve_set() {
   stale=()
-  if resolve_error=$(pacman -Sp --needed --noconfirm "$@" 2>&1 >/dev/null); then
+  # Capture stdout and stderr together: pacman prints "failed to prepare
+  # transaction" to stderr but the "unable to satisfy dependency '...' required
+  # by X" line that names X to stdout, and X is the package to build.
+  if resolve_error=$(pacman -Sp --needed --noconfirm "$@" 2>&1); then
     resolve_error=""
     return 0
   fi

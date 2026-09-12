@@ -54,8 +54,10 @@ fi
 # repository cannot satisfy, the way Arch Linux ARM's lagging rebuilds leave it.
 if [[ ${1:-} == "-Sp" ]]; then
   if [[ -n ${STUB_UNRESOLVED:-} ]]; then
+    # pacman prints the summary to stderr but the line naming the package to
+    # stdout, which is why resolve_set must capture both streams.
     echo "error: failed to prepare transaction (could not satisfy dependencies)" >&2
-    echo ":: unable to satisfy dependency 'libaquamarine.so=13-64' required by $STUB_UNRESOLVED" >&2
+    echo ":: unable to satisfy dependency 'libaquamarine.so=13-64' required by $STUB_UNRESOLVED"
     exit 1
   fi
   exit 0
