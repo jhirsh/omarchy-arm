@@ -167,6 +167,17 @@ grep -q "Not in the repositories and not in any manifest" <<<"$output" &&
   fail "every base package is accounted for by a manifest" "$output"
 pass "every base package is accounted for by a manifest"
 
+# A freshly flashed image's databases are weeks old and name packages the
+# mirror has rotated out, so the set must be refreshed and upgraded before the
+# transaction or the download 404s partway through.
+grep -qE "pacman'? '?-Syu'? '?--noconfirm" <<<"$output" ||
+  fail "the databases are refreshed and upgraded before installing" "$output"
+sync_line=$(grep -nE "pacman'? '?-Syu'? '?--noconfirm" <<<"$output" | head -1 | cut -d: -f1)
+txn_line=$(grep -n "Repository packages installed" <<<"$output" | head -1 | cut -d: -f1)
+[[ -n $sync_line && -n $txn_line ]] && (( sync_line < txn_line )) ||
+  fail "the refresh lands before the package transaction" "$output"
+pass "the databases are refreshed and upgraded before the package transaction"
+
 # nvim -> neovim is the substitution that keeps an editor on the machine after
 # Omarchy's own x86-only build is dropped.
 grep -q "would sync" <<<"$output" ||

@@ -486,13 +486,15 @@ else
   while read -r pkg; do known_aur_required[$pkg]=1; done < <(manifest packages.aur-required)
   while read -r pkg; do known_unavailable[$pkg]=1; done < <(manifest packages.unavailable)
 
-  # pacman -Si only knows what the last sync knew, so an unsynced machine would
-  # report the entire package set as missing.
-  sync_dir="${OMARCHY_PACMAN_SYNC_DIR:-/var/lib/pacman/sync}"
-  if [[ ! -d $sync_dir ]] || [[ -z $(ls -A "$sync_dir" 2>/dev/null) ]]; then
-    warn "The package databases have never been synced."
-    run sudo pacman -Sy --noconfirm
-  fi
+  # Refresh the databases, and upgrade the base with them, before resolving or
+  # installing anything. A freshly flashed image carries databases from build
+  # time: by install day they name package versions the mirror has already
+  # rotated out, so pacman -Si misjudges the set and, worse, the download 404s
+  # partway through the transaction. -Syu (not a bare -Sy) because installing
+  # new packages against a half-stale system is the partial upgrade Arch warns
+  # against. In a dry run this prints rather than touches anything, like every
+  # other mutating step.
+  run sudo pacman -Syu --noconfirm
 
   while read -r pkg; do
     [[ -n ${excluded[$pkg]:-} ]] && continue
