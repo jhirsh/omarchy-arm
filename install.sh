@@ -154,7 +154,13 @@ build_from_arch() {
     "https://gitlab.archlinux.org/archlinux/packaging/packages/$pkg.git" "$build_dir/$pkg"
   # Arch's recipes list x86_64 alone, and makepkg refuses any other machine.
   run sed -i "s/^arch=.*/arch=('aarch64')/" "$build_dir/$pkg/PKGBUILD"
-  run bash -c "cd '$build_dir/$pkg' && makepkg -si --noconfirm"
+  run bash -c "cd '$build_dir/$pkg' && makepkg -s --noconfirm"
+  run sudo bash -c "pacman -U --needed --noconfirm '$build_dir/$pkg'/*.pkg.tar.*"
+  # Keep the built package in pacman's cache, so install/arm/pin-packages.sh
+  # vendors exactly this artifact rather than relying on a copy that a local
+  # pacman -U does not reliably leave behind. Building and pinning are then one
+  # path: what was compiled and verified here is what other boards install.
+  run sudo bash -c "cp '$build_dir/$pkg'/*.pkg.tar.* /var/cache/pacman/pkg/"
   rm -rf "$build_dir"
 }
 
