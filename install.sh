@@ -148,13 +148,30 @@ build_from_arch() {
   tag="${epoch:+$epoch-}$ver-$rel"
 
   say "Building $pkg $tag from Arch's recipe. On a Raspberry Pi this takes a while."
-  run sudo pacman -S --needed --noconfirm base-devel git
+
+  # Drop any stale build of this package first. An earlier run may have built it
+  # against the old soname and installed it; if it is still here, upgrading the
+  # library below to the version this build will link is refused, and the build
+  # links the old soname again -- the exact loop this is breaking.
+  run sudo bash -c "pacman -Rdd --noconfirm '$pkg' 2>/dev/null || true"
+
+  # Build against current libraries. makepkg installs missing dependencies but
+  # never upgrades ones already present, so a stale aquamarine left on the
+  # machine gets linked and the main transaction then refuses its old soname.
+  # A full upgrade first is also the only supported way to build on Arch.
+  run sudo pacman -Syu --needed --noconfirm base-devel git
   build_dir=$(mktemp -d)
   run git clone --depth 1 --branch "$tag" \
     "https://gitlab.archlinux.org/archlinux/packaging/packages/$pkg.git" "$build_dir/$pkg"
   # Arch's recipes list x86_64 alone, and makepkg refuses any other machine.
   run sed -i "s/^arch=.*/arch=('aarch64')/" "$build_dir/$pkg/PKGBUILD"
-  run bash -c "cd '$build_dir/$pkg' && makepkg -si --noconfirm"
+  run bash -c "cd '$build_dir/$pkg' && makepkg -s --noconfirm"
+  run sudo bash -c "pacman -U --needed --noconfirm '$build_dir/$pkg'/*.pkg.tar.*"
+  # Keep the built package in pacman's cache, so install/arm/pin-packages.sh
+  # vendors exactly this artifact rather than relying on a copy that a local
+  # pacman -U does not reliably leave behind. Building and pinning are then one
+  # path: what was compiled and verified here is what other boards install.
+  run sudo bash -c "cp '$build_dir/$pkg'/*.pkg.tar.* /var/cache/pacman/pkg/"
   rm -rf "$build_dir"
 }
 
@@ -172,6 +189,58 @@ resolve_set() {
     return 0
   fi
   mapfile -t stale < <(grep -oE "required by [^ ]+" <<<"$resolve_error" | awk '{print $3}' | sort -u)
+}
+
+# Install the vendored known-good packages, the lock set.
+#
+# Arch Linux ARM rebuilds Arch's packages one at a time with no staging, and
+# keeps no dated archive, so the moment a library bumps its soname there is a
+# window of days where the repository cannot satisfy its own desktop and the
+# old coherent versions are already gone from every mirror. This drops in a set
+# built and checksummed ahead of time so a fresh install never waits for the
+# farm. install/arm/packages.pinned lists one "filename sha256" per line and a
+# "release:" header saying where the files live; regenerate both with
+# install/arm/pin-packages.sh from a machine where the desktop works.
+#
+# Returns 0 when a bundle was installed (so the caller re-resolves), 1 when
+# there is nothing pinned to fall back to.
+install_pinned_bundle() {
+  # Overridable so the test suite can point at a fixture instead of the shipped
+  # (normally empty) lock set.
+  local manifest="${OMARCHY_PINNED_MANIFEST:-$CHECKOUT/install/arm/packages.pinned}"
+  [[ -f $manifest ]] || return 1
+
+  local release
+  release=$(sed -n 's/^#[[:space:]]*release:[[:space:]]*//p' "$manifest" | head -1)
+  [[ -n $release ]] || return 1
+
+  local -a files=() names=()
+  local dir fn sha
+  dir=$(mktemp -d)
+  while read -r fn sha; do
+    [[ -n $fn && -n $sha ]] || continue
+    if ! run curl -fsSL --max-time 120 -o "$dir/$fn" "$release/$fn"; then
+      warn "Could not download the pinned $fn; skipping the lock set."
+      rm -rf "$dir"
+      return 1
+    fi
+    if (( ! DRY_RUN )) && ! printf '%s  %s\n' "$sha" "$dir/$fn" | sha256sum -c --status; then
+      rm -rf "$dir"
+      die "The pinned package $fn does not match its recorded checksum.
+       install/arm/packages.pinned is out of date or the download was tampered with."
+    fi
+    files+=("$dir/$fn")
+    names+=("${fn%-*-*-*}")
+  done < <(sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*$/d' "$manifest")
+
+  if (( ${#files[@]} == 0 )); then
+    rm -rf "$dir"
+    return 1
+  fi
+
+  say "Installing the vendored known-good set: ${names[*]}"
+  run sudo pacman -U --needed --noconfirm "${files[@]}"
+  rm -rf "$dir"
 }
 
 confirm() {
@@ -475,24 +544,51 @@ else
   # Resolve before asking, so a repository that cannot satisfy its own packages
   # today is found here and not after the prompt and the sudo password.
   resolve_set "${repo_pkgs[@]}"
+
+  if [[ -n $resolve_error ]]; then
+    warn "Arch Linux ARM cannot satisfy the package set as published today."
+    while read -r line; do say "  $line"; done < <(grep "unable to satisfy" <<<"$resolve_error" || true)
+
+    # First the vendored known-good set, which is instant. Only what it does not
+    # cover falls through to a build from Arch's recipe.
+    if install_pinned_bundle; then
+      resolve_set "${repo_pkgs[@]}"
+    fi
+  fi
+
   if [[ -n $resolve_error ]] && (( ${#stale[@]} == 0 )); then
-    die "pacman cannot resolve the package set:
+    die "pacman cannot resolve the package set, and no pinned bundle covers it:
        $resolve_error"
   fi
+
   if (( ${#stale[@]} > 0 )); then
-    warn "Arch Linux ARM cannot satisfy these today: ${stale[*]}"
-    while read -r line; do say "  $line"; done < <(grep "unable to satisfy" <<<"$resolve_error" || true)
-    say "A library they link was rebuilt and they were not yet. Building them from Arch's recipe instead."
-    for pkg in "${stale[@]}"; do
+    say "Not in the lock set: ${stale[*]}. Building them from Arch's recipe instead."
+    built=("${stale[@]}")
+    for pkg in "${built[@]}"; do
       build_from_arch "$pkg"
     done
+
+    # Drop what we just built from the repository target list. We installed a
+    # newer, coherent version ourselves; leaving it in asks pacman to install
+    # the repository's older build, which still links the pre-bump soname and
+    # makes the whole set resolve as unsatisfiable even though the machine is
+    # fine. The main transaction below then installs everything else.
+    kept=()
+    for pkg in "${repo_pkgs[@]}"; do
+      skip=0
+      for b in "${built[@]}"; do [[ $pkg == "$b" ]] && skip=1; done
+      (( skip )) || kept+=("$pkg")
+    done
+    repo_pkgs=("${kept[@]}")
+
     if (( ! DRY_RUN )); then
       resolve_set "${repo_pkgs[@]}"
       (( ${#stale[@]} == 0 )) ||
-        die "Still unresolvable after building ${stale[*]}:
+        die "Still unresolvable after building ${built[*]}:
        $resolve_error
-       Arch Linux ARM rebuilds packages one at a time after Arch does. Wait a day
-       or two and run ./install.sh again; it picks up where it left off."
+       Arch Linux ARM rebuilds packages one at a time after Arch does. Pin a
+       known-good set with install/arm/pin-packages.sh, or wait a day or two and
+       run ./install.sh again; it picks up where it left off."
     fi
   fi
 
