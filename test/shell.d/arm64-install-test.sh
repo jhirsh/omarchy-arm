@@ -368,6 +368,20 @@ grep -q "Package plan" <<<"$as_root" &&
   fail "the root run never calls sudo" "$(cat "$test_tmp/calls.log")"
 pass "as root, install.sh creates the user and hands over to them"
 
+# A user that already exists -- an earlier run, or the image's own userconf
+# provisioning -- keeps its password. Re-prompting on every re-run, or
+# overwriting what the image set, is the wrong move.
+existing=$(id -un)
+as_root_existing=$(OMARCHY_EUID=0 run_install "$arch_arm" --dry-run --user "$existing") ||
+  fail "install.sh --dry-run as root with an existing user succeeds" "$as_root_existing"
+grep -q "leaving its password alone" <<<"$as_root_existing" ||
+  fail "an existing user is recognised and its password left alone" "$as_root_existing"
+grep -qE "useradd'? " <<<"$as_root_existing" &&
+  fail "an existing user is not created again" "$as_root_existing"
+grep -qiE "chpasswd|Password for $existing" <<<"$as_root_existing" &&
+  fail "an existing user's password is never reset" "$as_root_existing"
+pass "an existing user keeps its password when install runs as root"
+
 no_name=$(OMARCHY_EUID=0 run_install "$arch_arm" --dry-run --yes) &&
   fail "root with --yes and no --user is refused" "$no_name"
 grep -q -- "--user NAME" <<<"$no_name" ||
