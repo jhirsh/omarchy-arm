@@ -11,6 +11,12 @@ cd omarchy-arm
 ./install.sh
 ```
 
+A fresh Arch Linux ARM image logs you in as root with no usable user. Run it as root then: it creates the user you name, sets their password (and root's, if root still has none), gives them sudo, and carries on the install as them.
+
+```bash
+./install.sh --user jonas
+```
+
 It installs onto a machine that is already running Arch Linux ARM. Upstream
 installs from an x86_64 ISO and has no installer for a running system, so
 `install.sh` is new here; porting the ISO would need a bootloader story per
