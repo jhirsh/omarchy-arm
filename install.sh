@@ -364,31 +364,36 @@ if (( euid == 0 )); then
   run pacman-key --populate archlinuxarm
   run pacman -Sy --needed --noconfirm sudo
   if id "$NEW_USER" &>/dev/null; then
-    ok "User $NEW_USER exists"
+    ok "User $NEW_USER exists; leaving its password alone."
+    created_user=0
   else
     run useradd -m -G wheel -s /bin/bash "$NEW_USER"
+    created_user=1
   fi
 
-  # The user's password, and root's too when root has none yet, as upstream's
-  # first boot sets it. A root password the image was provisioned with (the
-  # arch-linux-arm image takes one from rootpw on the boot partition) is left
-  # alone: that is the image's job, this only fills the gap when it was skipped.
-  if [[ $(passwd -S root 2>/dev/null | awk '{print $2}') == "P" ]]; then
-    root_too=""
-  else
-    root_too=1
-  fi
-  if (( DRY_RUN )); then
-    warn "[dry-run] chpasswd: set a password for $NEW_USER${root_too:+ and for root, which has none}"
-  else
-    read -rs -p "    Password for $NEW_USER${root_too:+ (root has none; it gets the same one)}: " password; echo
-    read -rs -p "    Again: " again; echo
-    [[ -n $password && $password == "$again" ]] || die "The passwords did not match."
-    {
-      printf '%s:%s\n' "$NEW_USER" "$password"
-      [[ -z $root_too ]] || printf 'root:%s\n' "$password"
-    } | chpasswd
-    unset password again
+  # Set a password only for a user we just created. One that already exists has
+  # its own -- set here on an earlier run, or by the image's userconf path -- and
+  # re-prompting on every re-run, or overwriting the image's, is the wrong move.
+  # Root's is set to the same only when we create the user and root has none yet
+  # (the image's rootpw path is left to own it otherwise).
+  if (( created_user )); then
+    if [[ $(passwd -S root 2>/dev/null | awk '{print $2}') == "P" ]]; then
+      root_too=""
+    else
+      root_too=1
+    fi
+    if (( DRY_RUN )); then
+      warn "[dry-run] chpasswd: set a password for $NEW_USER${root_too:+ and for root, which has none}"
+    else
+      read -rs -p "    Password for $NEW_USER${root_too:+ (root has none; it gets the same one)}: " password; echo
+      read -rs -p "    Again: " again; echo
+      [[ -n $password && $password == "$again" ]] || die "The passwords did not match."
+      {
+        printf '%s:%s\n' "$NEW_USER" "$password"
+        [[ -z $root_too ]] || printf 'root:%s\n' "$password"
+      } | chpasswd
+      unset password again
+    fi
   fi
 
   # Same drop-in upstream writes, so the two never disagree.
