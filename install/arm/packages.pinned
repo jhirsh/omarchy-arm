@@ -1,0 +1,16 @@
+# Vendored known-good packages: the lock set.
+#
+# Arch Linux ARM rebuilds Arch's packages one at a time with no staging and
+# keeps no dated archive, so when a library bumps its soname the repository
+# cannot satisfy its own desktop for a few days and the old coherent versions
+# are already gone from every mirror. This file, with the package files in the
+# release named below, lets a fresh install drop in a set known to work instead
+# of waiting for the build farm or compiling on the Pi.
+#
+# Regenerate both this list and the release from a machine where the desktop
+# works, with install/arm/pin-packages.sh. Empty means the mechanism is dormant
+# and install.sh falls back to building from Arch's recipe.
+#
+# release: https://github.com/jhirsh/omarchy-arm/releases/download/pinned-packages
+#
+# filename                                     sha256

@@ -119,6 +119,7 @@ run_install() {
   OMARCHY_ARCH="${STUB_ARCH:-aarch64}" \
   OMARCHY_DEVICETREE="$test_tmp/dt" \
   OMARCHY_PACMAN_SYNC_DIR="$test_tmp/sync" \
+  OMARCHY_PINNED_MANIFEST="${OMARCHY_PINNED_MANIFEST:-}" \
   OMARCHY_ARM_SKEL="$test_tmp/skel" \
   HOME="$test_tmp/home" \
   PATH="$stub_bin:$PATH" \
@@ -382,16 +383,42 @@ pass "root without a usable user name is refused"
 # whole transaction after the password.
 stale=$(STUB_UNRESOLVED=hyprland run_install "$arch_arm" --dry-run) ||
   fail "an unresolvable package does not fail the dry run" "$stale"
-grep -q "cannot satisfy these today: hyprland" <<<"$stale" ||
-  fail "the plan names the package the repository cannot satisfy" "$stale"
+grep -q "cannot satisfy the package set" <<<"$stale" ||
+  fail "the plan reports the repository cannot satisfy the set" "$stale"
+grep -q "unable to satisfy dependency .* required by hyprland" <<<"$stale" ||
+  fail "the plan shows pacman's own line naming hyprland" "$stale"
+grep -q "Installing the vendored known-good set" <<<"$stale" &&
+  fail "with no lock set pinned, nothing claims to install a vendored bundle" "$stale"
 grep -qE "git'? '?clone.*--branch'? '?0.56.2-2.*packages/hyprland.git" <<<"$stale" ||
   fail "the fallback clones Arch's recipe at the version x86_64 ships" "$stale"
 grep -q "makepkg -si" <<<"$stale" ||
   fail "the fallback builds and installs the package" "$stale"
-stale_line=$(grep -n "cannot satisfy these today" <<<"$stale" | head -1 | cut -d: -f1 || true)
+stale_line=$(grep -n "cannot satisfy the package set" <<<"$stale" | head -1 | cut -d: -f1 || true)
 install_line=$(grep -n "Repository packages installed" <<<"$stale" | head -1 | cut -d: -f1 || true)
 [[ -n $stale_line && -n $install_line ]] ||
   fail "the resolve check and the package install both appear" "$stale"
 (( stale_line < install_line )) ||
   fail "the resolve check lands before the package transaction" "$stale"
 pass "an unresolvable package is built from Arch's recipe before the package transaction"
+
+# With a lock set pinned, the vendored known-good packages go in first, before
+# anything is compiled from a recipe.
+pinned="$test_tmp/packages.pinned"
+cat >"$pinned" <<'PIN'
+# release: https://example.invalid/pinned
+# filename                           sha256
+hyprland-0.56.1-3-aarch64.pkg.tar.xz  0000000000000000000000000000000000000000000000000000000000000000
+PIN
+locked=$(OMARCHY_PINNED_MANIFEST="$pinned" STUB_UNRESOLVED=hyprland run_install "$arch_arm" --dry-run) ||
+  fail "an unresolvable set with a lock set does not fail the dry run" "$locked"
+grep -q "Installing the vendored known-good set: hyprland" <<<"$locked" ||
+  fail "the lock set is installed when the repository cannot satisfy the set" "$locked"
+grep -qE "pacman'? '?-U.*hyprland-0.56.1-3-aarch64.pkg.tar.xz" <<<"$locked" ||
+  fail "the pinned package file is installed with pacman -U" "$locked"
+pinned_line=$(grep -n "vendored known-good set" <<<"$locked" | head -1 | cut -d: -f1 || true)
+recipe_line=$(grep -n "Building them from Arch's recipe" <<<"$locked" | head -1 | cut -d: -f1 || true)
+[[ -n $pinned_line ]] ||
+  fail "the lock set install appears in the plan" "$locked"
+[[ -z $recipe_line ]] || (( pinned_line < recipe_line )) ||
+  fail "the lock set is tried before building from a recipe" "$locked"
+pass "a pinned lock set is installed before falling back to a recipe build"
