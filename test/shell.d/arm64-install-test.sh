@@ -208,6 +208,15 @@ grep -q "would copy .* shipped defaults into" <<<"$output" ||
   fail "the shipped defaults are copied into an existing user's home" "$output"
 pass "the shipped defaults are copied into an existing user's home"
 
+# The Omarchy greeter logs in userModel.lastUser and offers no field to type a
+# name, so the install must seed SDDM's last user or the first graphical login
+# submits an empty user and fails with "user not known".
+grep -q "/var/lib/sddm/state.conf" <<<"$output" ||
+  fail "the install seeds SDDM's last user" "$output"
+grep -qE "User=%s.*'?$USER'?|Session=omarchy.desktop" <<<"$output" ||
+  fail "the greeter seed names the installing user" "$output"
+pass "the install seeds SDDM's last user so the first login has a name"
+
 # A backup this installer leaves inside the template would be copied into every
 # future user's home as if it were a shipped default.
 grep -q 'dest != \*"\$skel"\*' "$ROOT/install/arm/settings.sh" ||

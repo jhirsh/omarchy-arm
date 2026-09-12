@@ -766,6 +766,16 @@ step "User setup"
 # seeding step copies them in, so nothing replays.
 run "$TARGET/bin/omarchy-provision-user" --force
 
+# Seed SDDM's last user. The Omarchy greeter logs in userModel.lastUser and has
+# no field to type a name, so on a fresh install -- where nobody has logged in
+# through SDDM yet -- it submits an empty user and authentication fails with
+# "user not known to the underlying authentication module". Upstream seeds this
+# in omarchy-provision-owner's configure_login, which the ISO runs and this
+# installer does not. No autologin drop-in: the user logs in with a password.
+run sudo mkdir -p /var/lib/sddm
+run sudo bash -c "printf '[Last]\nSession=omarchy.desktop\nUser=%s\n' '$USER' >/var/lib/sddm/state.conf"
+run sudo bash -c "chown -R sddm:sddm /var/lib/sddm 2>/dev/null || true"
+
 ########################################################################
 step "AUR packages"
 ########################################################################
