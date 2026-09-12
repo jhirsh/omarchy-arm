@@ -409,6 +409,14 @@ install_line=$(grep -n "Repository packages installed" <<<"$stale" | head -1 | c
   fail "the resolve check lands before the package transaction" "$stale"
 pass "an unresolvable package is built from Arch's recipe before the package transaction"
 
+# What was built is dropped from the repository transaction: we installed a
+# newer coherent version ourselves, and asking pacman for the repo's older
+# build would make the set resolve as unsatisfiable again.
+transaction=$(grep -E "pacman -S --needed --noconfirm" <<<"$stale" | grep -v "base-devel" | tail -1)
+grep -qw hyprland <<<"$transaction" &&
+  fail "the built package is not handed back to the repository transaction" "$transaction"
+pass "a recipe-built package is dropped from the repository transaction"
+
 # With a lock set pinned, the vendored known-good packages go in first, before
 # anything is compiled from a recipe.
 pinned="$test_tmp/packages.pinned"

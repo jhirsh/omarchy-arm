@@ -563,13 +563,28 @@ else
 
   if (( ${#stale[@]} > 0 )); then
     say "Not in the lock set: ${stale[*]}. Building them from Arch's recipe instead."
-    for pkg in "${stale[@]}"; do
+    built=("${stale[@]}")
+    for pkg in "${built[@]}"; do
       build_from_arch "$pkg"
     done
+
+    # Drop what we just built from the repository target list. We installed a
+    # newer, coherent version ourselves; leaving it in asks pacman to install
+    # the repository's older build, which still links the pre-bump soname and
+    # makes the whole set resolve as unsatisfiable even though the machine is
+    # fine. The main transaction below then installs everything else.
+    kept=()
+    for pkg in "${repo_pkgs[@]}"; do
+      skip=0
+      for b in "${built[@]}"; do [[ $pkg == "$b" ]] && skip=1; done
+      (( skip )) || kept+=("$pkg")
+    done
+    repo_pkgs=("${kept[@]}")
+
     if (( ! DRY_RUN )); then
       resolve_set "${repo_pkgs[@]}"
       (( ${#stale[@]} == 0 )) ||
-        die "Still unresolvable after building ${stale[*]}:
+        die "Still unresolvable after building ${built[*]}:
        $resolve_error
        Arch Linux ARM rebuilds packages one at a time after Arch does. Pin a
        known-good set with install/arm/pin-packages.sh, or wait a day or two and
