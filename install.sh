@@ -341,7 +341,9 @@ if (( euid == 0 )); then
 
   cmd=("$CHECKOUT/install.sh" "${ARGS[@]}")
   say "Continuing as $NEW_USER."
-  exec su - "$NEW_USER" -c "${cmd[*]@Q}"
+  # --pty, or su runs the install in a session with no controlling terminal and
+  # the first sudo -v below has nowhere to read its password from.
+  exec su --pty - "$NEW_USER" -c "${cmd[*]@Q}"
 fi
 
 # Before the first sudo below, so the one password prompt this run needs lands
