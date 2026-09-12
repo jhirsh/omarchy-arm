@@ -148,7 +148,18 @@ build_from_arch() {
   tag="${epoch:+$epoch-}$ver-$rel"
 
   say "Building $pkg $tag from Arch's recipe. On a Raspberry Pi this takes a while."
-  run sudo pacman -S --needed --noconfirm base-devel git
+
+  # Drop any stale build of this package first. An earlier run may have built it
+  # against the old soname and installed it; if it is still here, upgrading the
+  # library below to the version this build will link is refused, and the build
+  # links the old soname again -- the exact loop this is breaking.
+  run sudo bash -c "pacman -Rdd --noconfirm '$pkg' 2>/dev/null || true"
+
+  # Build against current libraries. makepkg installs missing dependencies but
+  # never upgrades ones already present, so a stale aquamarine left on the
+  # machine gets linked and the main transaction then refuses its old soname.
+  # A full upgrade first is also the only supported way to build on Arch.
+  run sudo pacman -Syu --needed --noconfirm base-devel git
   build_dir=$(mktemp -d)
   run git clone --depth 1 --branch "$tag" \
     "https://gitlab.archlinux.org/archlinux/packaging/packages/$pkg.git" "$build_dir/$pkg"

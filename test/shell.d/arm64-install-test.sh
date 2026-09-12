@@ -393,6 +393,10 @@ grep -qE "git'? '?clone.*--branch'? '?0.56.2-2.*packages/hyprland.git" <<<"$stal
   fail "the fallback clones Arch's recipe at the version x86_64 ships" "$stale"
 grep -q "makepkg -s " <<<"$stale" ||
   fail "the fallback builds the package" "$stale"
+grep -qE "pacman -Rdd --noconfirm.*hyprland" <<<"$stale" ||
+  fail "the fallback clears any stale build of the package first" "$stale"
+grep -qE "pacman'? '?-Syu'? '?--needed'? '?--noconfirm'? '?base-devel" <<<"$stale" ||
+  fail "the fallback upgrades the libraries before building against them" "$stale"
 grep -qE "pacman -U --needed.*\.pkg\.tar" <<<"$stale" ||
   fail "the fallback installs what it built" "$stale"
 grep -q "/var/cache/pacman/pkg" <<<"$stale" ||
