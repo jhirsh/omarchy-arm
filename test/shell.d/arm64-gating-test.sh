@@ -148,10 +148,10 @@ pass "the needed AUR packages land before the setup phases that use them"
 # /usr/local/share/wayland-sessions, which are scanned by name.
 grep -q 'cmp -s "\$src" "\$dest"' "$ROOT/install/arm/settings.sh" ||
   fail "a backup is only made when the file actually differs"
-# scalable/ is for SVG; a PNG there is an icon lookup that returns nothing.
-grep -q 'icons/hicolor/256x256/apps' "$ROOT/install/arm/settings.sh" ||
-  fail "PNG icons go in a pixel-size directory, not scalable"
-pass "the installer leaves no stray backups and files icons by size"
+# Where icons land, and under which names, is arm64-app-icons-test.sh.
+grep -q 'source "\$OMARCHY_PATH/install/arm/app-icons.sh"' "$ROOT/install/arm/settings.sh" ||
+  fail "the installer places the application icons"
+pass "the installer leaves no stray backups and places the application icons"
 
 # The Hyprland profile has to load after Omarchy's own look'n'feel or it would
 # be overwritten by it, and before the user's, or it would overwrite theirs.
