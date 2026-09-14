@@ -165,14 +165,8 @@ place_tree "$OMARCHY_PATH/default/plymouth" /usr/share/plymouth/themes/omarchy
 place 644 "$OMARCHY_PATH/icon.png" /usr/share/pixmaps/omarchy.png
 place 644 "$OMARCHY_PATH/icon.png" /usr/share/icons/hicolor/256x256/apps/omarchy.png
 
-if [[ -d $OMARCHY_PATH/applications/icons ]]; then
-  for icon in "$OMARCHY_PATH"/applications/icons/*; do
-    [[ -f $icon ]] || continue
-    # scalable/ is for SVG. These are PNGs, and an icon lookup that finds a
-    # bitmap where it expected a vector quietly returns nothing.
-    place 644 "$icon" "/usr/share/icons/hicolor/256x256/apps/$(basename "$icon")"
-  done
-fi
+# Under their freedesktop icon names, which is what the desktop files ask for.
+source "$OMARCHY_PATH/install/arm/app-icons.sh"
 
 if (( ! dry )); then
   ln -sf /usr/share/fontconfig/conf.avail/50-omarchy.conf "$root/etc/fonts/conf.d/50-omarchy.conf" 2>/dev/null || true

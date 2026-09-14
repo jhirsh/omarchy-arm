@@ -340,6 +340,7 @@ session, to an app someone tried to install afterwards, or to the next update:
 | Omarchy ships zram tuning, the ISO ships the generator | the drop-in was installed and `zram-generator` was not, so the machine had no compressed swap at all |
 | PipeWire comes in as a dependency, its PulseAudio server does not | `pactl` answered "Connection refused" on a finished desktop: three shipped `omarchy-audio-*` commands talking to nothing, and silence in every application that speaks the PulseAudio API |
 | Two commands are `644` in git | the omarchy package installs `bin/*` with `install -Dm755`, so they work on x86. Linking only what git marks executable left two menu entries doing nothing |
+| App icons were copied under their source file names | the desktop files ask for icon names (`basecamp`, `google-maps`) and lookup is case-sensitive, so 11 of the 16 shipped launchers showed no logo and Zoom picked up Breeze's magnifying glass. The omarchy-settings package lowercases and dashes each name and renders 256 and 48 px copies; `install/arm/app-icons.sh` now does the same |
 
 The keyboard one deserves its own note, because the mechanism was already
 there and still failed. `default/hypr/input.lua` reads `XKBLAYOUT` out of
