@@ -26,6 +26,10 @@ The `quattro` branch is upstream's, unmodified, so the whole port is
 `git diff quattro arm64`. What changed, what it cost, and what still does not
 work is in [`docs/arm64-port.md`](docs/arm64-port.md).
 
+On a Raspberry Pi 5 with an NVMe drive, `omarchy setup pi nvme boot` moves the
+system off the SD card and onto the drive; see
+[`manual/52-raspberry-pi-nvme-boot.md`](manual/52-raspberry-pi-nvme-boot.md).
+
 MIT, like upstream. The copyright in `LICENSE` stays David Heinemeier
 Hansson's, and everything added here is contributed under the same terms. This
 is an unofficial port and is not affiliated with Omarchy or Basecamp.

@@ -247,6 +247,13 @@ This is the one place where being conservative is not a style preference: a
 wrong initramfs hook on either machine produces a device that no longer boots
 and cannot be recovered from inside the session.
 
+The one exception is opt-in and Pi-only: `omarchy setup pi nvme boot` copies
+the running system onto an NVMe drive, rewrites the copy's `cmdline.txt` and
+`fstab`, and schedules a bootloader EEPROM update with NVMe first in
+`BOOT_ORDER`. It never edits the disk it is booted from, and it leaves that
+disk second in the boot order, so a copy that does not boot falls back to a
+system that still does. The install never runs it.
+
 ## The agent layer
 
 Omarchy ships an agent skill at `default/agents/skills/omarchy/` that lets an
