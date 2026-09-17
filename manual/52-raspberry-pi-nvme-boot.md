@@ -29,13 +29,28 @@ sudo parted -s -a optimal /dev/nvme0n1 mklabel msdos \
   mkpart primary ext4 513MiB 100%
 ```
 
-This gives the drive the same shape as a Raspberry Pi SD card image. `mklabel msdos` writes an MBR partition table. The two numbers on each `mkpart` are where the partition starts and ends on the disk, not sizes: the first runs from 1 MiB to 513 MiB (512 MiB, the size Pi images ship with), and the second from 513 MiB to the end. The first 1 MiB holds the partition table and lines partitions up with the drive's internal blocks.
+This gives the drive the same shape as a Raspberry Pi SD card image. `mklabel msdos` writes an MBR partition table.
 
-**Partition 1 is FAT32** because it is read before Linux starts. The Pi's bootloader lives in an EEPROM chip on the board and only understands FAT. It loads `config.txt`, `cmdline.txt`, the kernel, the initramfs and the device tree files from this partition.
+- **Partition table:** a small map at the start of the disk that lists where each partition begins and ends; it is not a filesystem, so it is neither FAT32 nor ext4.
+- **MBR (Master Boot Record):** the older partition table format, stored in the disk's first 512 bytes, which `parted` calls `msdos` after the DOS-era PCs it came from; the newer format is GPT.
+
+The two numbers on each `mkpart` are where the partition starts and ends on the disk, not sizes: the first runs from 1 MiB to 513 MiB (512 MiB, the size Pi images ship with), and the second from 513 MiB to the end. The MBR sits at the very start of that first 1 MiB; the rest of it is left empty so that partitions line up with the drive's internal blocks. The FAT32 partition begins after it.
+
+```
+0      1 MiB                  513 MiB                               end
+├──────┼──────────────────────┼──────────────────────────────────────┤
+│ MBR  │ partition 1: FAT32   │ partition 2: ext4                    │
+│+ gap │ firmware (/boot)     │ root (/)                             │
+```
+
+**Partition 1 is FAT32** because it is read before Linux starts. It is called the firmware partition (or boot partition) and is mounted at `/boot`. The Pi's bootloader lives in an EEPROM chip on the board and only understands FAT. It loads `config.txt`, `cmdline.txt`, the kernel, the initramfs and the device tree files from this partition.
 
 **Partition 2 is ext4** because that is where Linux runs from, and it needs what FAT lacks: file owners and permissions, symlinks, and a journal that survives a power cut.
 
 Partitions are numbered in the order they are created. The kernel names them after the device: `nvme0n1` is NVMe controller 0, namespace 1, and its partitions are `nvme0n1p1` and `nvme0n1p2`. An SD card's are `mmcblk0p1` and `mmcblk0p2`.
+
+- **Controller:** the chip on the NVMe drive that talks to the computer over PCIe and manages its flash memory; the first drive found is controller 0.
+- **Namespace:** a region of the drive's storage that the controller presents as a separate disk; consumer drives have exactly one, so it is always `n1`.
 
 ### 2. Format the partitions
 
@@ -65,9 +80,22 @@ sudo mount /dev/nvme0n1p1 /mnt/nvme/boot
 sudo rsync -rt --modify-window=1 --info=progress2 /boot/ /mnt/nvme/boot/
 ```
 
-`/dev/nvme0n1p2` is the raw partition: bytes that can be formatted, but not browsed. Mounting it attaches its filesystem to a directory so its files can be read and written there. The command mounts under a temporary directory and unmounts when it is done; `/mnt/nvme` above is just a readable stand-in.
+`/dev/nvme0n1p2` is the raw partition: bytes that can be formatted, but not browsed. Files and folders are not something a partition has on its own; they are a structure the filesystem writes into those bytes (directory listings, file names, where each file's data lives). Something has to read that structure before there is anything to browse, and that is what mounting does.
 
-`-x` keeps rsync on the root filesystem, so `/proc`, `/sys`, `/run` and the firmware partition come across as empty mount points rather than being copied. The firmware partition is copied separately, without owners or permissions because FAT has none. On Raspberry Pi OS it is mounted at `/boot/firmware` rather than `/boot`; the command detects which.
+- **Mount:** have the kernel read a partition's filesystem and attach it to a directory, so its files appear under that directory; Linux has a single directory tree starting at `/` and no drive letters, so this is how every disk becomes reachable.
+
+The command mounts under a temporary directory and unmounts when it is done; `/mnt/nvme` above is just a readable stand-in.
+
+`-x` (long form `--one-file-system`) tells rsync not to cross into a different filesystem. Copying `/` without it would walk into everything mounted inside the tree, and several of those must not be copied:
+
+- `/proc` and `/sys` are not files on any disk; the kernel generates them on the fly to describe running processes and hardware.
+- `/run`, and on most systems `/tmp`, live in memory and are rebuilt at every boot.
+- `/boot` is the firmware partition, a different filesystem that needs its own copy (below).
+- The NVMe drive itself is mounted inside `/` for the copy, so rsync would copy the copy into itself.
+
+With `-x`, each of these mount points is created as an empty directory, which is all the copy needs: the system mounts the real thing there when it boots.
+
+The firmware partition (partition 1) is then copied separately, without owners or permissions because FAT has none. On Raspberry Pi OS it is mounted at `/boot/firmware` rather than `/boot`; the command detects which.
 
 ### 4. Point the copy at itself
 
