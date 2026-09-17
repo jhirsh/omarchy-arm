@@ -1,0 +1,357 @@
+#!/bin/bash
+
+# omarchy:summary=Copy a Raspberry Pi 5's running system onto an NVMe drive and boot from it
+# omarchy:args=[--dry-run] [--gen3] [drive]
+# omarchy:examples=omarchy setup pi nvme boot --dry-run | omarchy setup pi nvme boot --gen3 /dev/nvme0n1
+# omarchy:requires-sudo=true
+
+# Moves a Raspberry Pi 5 from its SD card (or USB drive) onto an NVMe drive
+# attached through a PCIe HAT or base. The walkthrough, and what each step is
+# for, is in manual/52-raspberry-pi-nvme-boot.md.
+#
+# The source disk is only ever read. What happens, in order:
+#
+#   1. Erase the NVMe drive and give it the same shape as a Pi boot disk: an
+#      MBR table, a 512 MiB FAT32 partition the firmware loads the kernel
+#      from, and an ext4 partition for everything else.
+#   2. Copy the running system onto it with rsync.
+#   3. Point the copy at itself. cmdline.txt tells the kernel where root is and
+#      /etc/fstab says where to mount the firmware partition; both still name
+#      the source disk. Each is rewritten to the new partition's PARTUUID.
+#   4. Turn on the PCIe connector in the copy's config.txt (and Gen 3 speed,
+#      with --gen3).
+#   5. Schedule a bootloader EEPROM update that tries NVMe first. It is applied
+#      on the next reboot, and the source disk stays in the boot order behind
+#      NVMe, so a copy that fails to boot falls back to it.
+#
+# --dry-run prints every command and the rewritten files without changing
+# anything.
+
+BOOT_LABEL="NVME-BOOT"
+ROOT_LABEL="NVME-ROOT"
+
+# The firmware partition ends here: 1 MiB of room for the partition table, then
+# 512 MiB, the size Raspberry Pi images ship with.
+BOOT_END_MIB=513
+
+# Read right to left: NVMe (6), SD card (1), USB (4), then start over (f).
+NVME_FIRST_BOOT_ORDER="0xf416"
+
+dry_run=false
+gen3=false
+target=""
+mount_dir=""
+
+usage() {
+  echo "Usage: omarchy-setup-pi-nvme-boot [--dry-run] [--gen3] [/dev/nvmeXn1]"
+}
+
+# Runs a command, or only prints it under --dry-run.
+run() {
+  if [[ $dry_run == true ]]; then
+    printf '  would run: %s\n' "$*"
+  else
+    "$@"
+  fi
+}
+
+# /boot on Arch Linux ARM, /boot/firmware on Raspberry Pi OS.
+firmware_mount() {
+  if mountpoint -q /boot/firmware; then
+    echo /boot/firmware
+  elif mountpoint -q /boot; then
+    echo /boot
+  else
+    return 1
+  fi
+}
+
+# nvme0n1 numbers its partitions nvme0n1p1; sda numbers them sda1.
+partition_path() {
+  local disk="$1" number="$2"
+
+  if [[ $disk =~ [0-9]$ ]]; then
+    echo "${disk}p${number}"
+  else
+    echo "${disk}${number}"
+  fi
+}
+
+# Filter for cmdline.txt: point root= at the new partition, whatever form the
+# old value took (PARTUUID=, UUID=, LABEL= or a /dev path).
+cmdline_with_root() {
+  local partuuid="$1" cmdline
+
+  cmdline=$(cat)
+  if [[ ! $cmdline =~ (^|[[:space:]])root= ]]; then
+    echo "Error: cmdline.txt has no root= to rewrite" >&2
+    return 1
+  fi
+
+  sed -E "s#(^|[[:space:]])root=[^[:space:]]+#\1root=PARTUUID=$partuuid#" <<<"$cmdline"
+}
+
+# Filter for /etc/fstab: the entries for / and the firmware partition name the
+# source disk, so they are pointed at the new partitions. Spacing, options and
+# comments are kept. A firmware entry that was missing is added, since the copy
+# cannot find the partition by any other means.
+fstab_with_partitions() {
+  local boot_mount="$1" boot_partuuid="$2" root_partuuid="$3"
+
+  awk -v boot_mount="$boot_mount" -v boot_spec="PARTUUID=$boot_partuuid" -v root_spec="PARTUUID=$root_partuuid" '
+    /^[[:space:]]*(#|$)/ { print; next }
+    $2 == "/" || $2 == boot_mount {
+      spec = ($2 == "/") ? root_spec : boot_spec
+      if ($2 == boot_mount) found_boot = 1
+      match($0, /^[[:space:]]*/)
+      print substr($0, 1, RLENGTH) spec substr($0, RLENGTH + length($1) + 1)
+      next
+    }
+    { print }
+    END {
+      if (!found_boot) printf "%s  %s  vfat  defaults  0  2\n", boot_spec, boot_mount
+    }
+  '
+}
+
+# Filter for config.txt: enable the PCIe connector, and with gen3=true run it
+# at Gen 3. Gen 2 is what the Pi 5 certifies; most drives and HATs are stable at
+# Gen 3, which roughly doubles throughput. Lines are added under [all] so a
+# conditional section at the end of the file ([cm4], [pi4]) cannot swallow them.
+config_with_pcie() {
+  local gen3="$1" config added=()
+
+  config=$(cat)
+
+  if [[ $gen3 == true ]] && grep -Eq '^[[:space:]]*dtparam=pciex1_gen=' <<<"$config"; then
+    config=$(sed -E 's/^([[:space:]]*dtparam=pciex1_gen=)[0-9]+/\13/' <<<"$config")
+  elif [[ $gen3 == true ]]; then
+    added+=("dtparam=pciex1_gen=3")
+  fi
+
+  if ! grep -Eq '^[[:space:]]*dtparam=(pciex1|nvme)([[:space:],]|$)' <<<"$config"; then
+    added=("dtparam=pciex1" "${added[@]}")
+  fi
+
+  printf '%s\n' "$config"
+  if (( ${#added[@]} > 0 )); then
+    printf '\n[all]\n# Added by omarchy-setup-pi-nvme-boot\n'
+    printf '%s\n' "${added[@]}"
+  fi
+}
+
+# Filter for the bootloader EEPROM config: try NVMe first, and probe the PCIe
+# bus at boot so HATs without their own identification EEPROM are found.
+eeprom_with_nvme_first() {
+  awk -v order="$NVME_FIRST_BOOT_ORDER" '
+    /^[[:space:]]*BOOT_ORDER=/ { if (!has_order) print "BOOT_ORDER=" order; has_order = 1; next }
+    /^[[:space:]]*PCIE_PROBE=/ { if (!has_probe) print "PCIE_PROBE=1"; has_probe = 1; next }
+    { print }
+    END {
+      if (!has_order || !has_probe) print "[all]"
+      if (!has_order) print "BOOT_ORDER=" order
+      if (!has_probe) print "PCIE_PROBE=1"
+    }
+  '
+}
+
+# Rewrites a root-owned file through one of the filters above.
+rewrite_file() {
+  local file="$1" content
+  shift
+
+  content=$(sudo cat "$file" | "$@")
+  printf '%s\n' "$content" | sudo tee "$file" >/dev/null
+}
+
+cleanup() {
+  [[ -n $mount_dir ]] || return 0
+  sync
+  sudo umount -R "$mount_dir" 2>/dev/null || true
+  rmdir "$mount_dir" 2>/dev/null || true
+  mount_dir=""
+}
+
+pick_target() {
+  local drives count
+
+  drives=$(lsblk -dpno NAME,TYPE | awk '$2 == "disk" && $1 ~ /^\/dev\/nvme/ { print $1 }')
+  count=$(grep -c . <<<"$drives" || true)
+
+  if (( count == 0 )); then
+    echo "Error: no NVMe drive found." >&2
+    echo "Check the ribbon cable, then add dtparam=pciex1 to config.txt and reboot." >&2
+    return 1
+  elif (( count == 1 )); then
+    echo "$drives"
+  else
+    omarchy-drive-select $drives
+  fi
+}
+
+main() {
+  set -eo pipefail
+
+  while (( $# > 0 )); do
+    case "$1" in
+      --dry-run) dry_run=true ;;
+      --gen3) gen3=true ;;
+      -h | --help) usage; exit 0 ;;
+      -*) usage >&2; exit 1 ;;
+      *) target="$1" ;;
+    esac
+    shift
+  done
+
+  if ! omarchy-hw-raspberry-pi --5; then
+    echo "Error: this is for a Raspberry Pi 5" >&2
+    exit 1
+  fi
+
+  local boot_mount root_source
+  if ! boot_mount=$(firmware_mount); then
+    echo "Error: the firmware partition is not mounted at /boot or /boot/firmware" >&2
+    exit 1
+  fi
+
+  root_source=$(findmnt -no SOURCE /)
+  if [[ $root_source == /dev/nvme* ]]; then
+    echo "Already booted from NVMe ($root_source); nothing to do."
+    exit 0
+  fi
+
+  if [[ -z $target ]]; then
+    target=$(pick_target)
+  fi
+
+  if [[ $(lsblk -dno TYPE "$target" 2>/dev/null) != "disk" || $target != /dev/nvme* ]]; then
+    echo "Error: $target is not an NVMe drive" >&2
+    exit 1
+  fi
+
+  if lsblk -no MOUNTPOINTS "$target" | grep -q .; then
+    echo "Error: $target has mounted partitions; unmount them first" >&2
+    exit 1
+  fi
+
+  local used_bytes target_bytes
+  used_bytes=$(df -B1 --output=used / "$boot_mount" | awk 'NR > 1 { sum += $1 } END { print sum }')
+  target_bytes=$(lsblk -bdno SIZE "$target")
+  if (( used_bytes > target_bytes - BOOT_END_MIB * 1024 * 1024 )); then
+    echo "Error: $target is too small for the $(numfmt --to=iec "$used_bytes") this system uses" >&2
+    exit 1
+  fi
+
+  local boot_part root_part
+  boot_part=$(partition_path "$target" 1)
+  root_part=$(partition_path "$target" 2)
+
+  echo "Source: $root_source (firmware partition at $boot_mount)"
+  echo "Target: $(omarchy-drive-info "$target")"
+  echo
+
+  if [[ $dry_run == true ]]; then
+    echo "Dry run: nothing will be changed."
+  else
+    echo "Everything on $target will be erased. The source disk is only read."
+    echo "Close other applications first so files are not changing during the copy."
+    gum confirm "Erase $target and copy this system onto it?" || exit 1
+    sudo -v
+  fi
+
+  trap cleanup EXIT
+
+  echo
+  echo "Partitioning $target"
+  run sudo wipefs -a "$target"
+  run sudo parted -s -a optimal "$target" \
+    mklabel msdos \
+    mkpart primary fat32 1MiB "${BOOT_END_MIB}MiB" \
+    mkpart primary ext4 "${BOOT_END_MIB}MiB" 100%
+  run sudo udevadm settle
+
+  echo "Formatting"
+  run sudo mkfs.vfat -F 32 -n "$BOOT_LABEL" "$boot_part"
+  run sudo mkfs.ext4 -F -L "$ROOT_LABEL" "$root_part"
+
+  echo "Copying the system (this takes a while)"
+  local copy_dir
+  if [[ $dry_run == true ]]; then
+    copy_dir="<temporary directory>"
+  else
+    mount_dir=$(mktemp -d)
+    copy_dir="$mount_dir"
+  fi
+  run sudo mount "$root_part" "$copy_dir"
+  # -x stays on the root filesystem, so /proc, /sys, /run and the firmware
+  # partition are created as empty mount points instead of being copied.
+  run sudo rsync -aHAXxS --numeric-ids --info=progress2 / "$copy_dir/"
+  run sudo mkdir -p "$copy_dir$boot_mount"
+  run sudo mount "$boot_part" "$copy_dir$boot_mount"
+  # FAT has no owners or permissions and stores times to 2 seconds. A pending
+  # EEPROM update is left behind so the copy does not apply it a second time.
+  run sudo rsync -rt --modify-window=1 --info=progress2 \
+    --exclude=/pieeprom.upd --exclude=/pieeprom.sig --exclude=/recovery.bin \
+    "$boot_mount/" "$copy_dir$boot_mount/"
+
+  local boot_partuuid root_partuuid
+  if [[ $dry_run == true ]]; then
+    boot_partuuid="<new-boot-partuuid>"
+    root_partuuid="<new-root-partuuid>"
+  else
+    boot_partuuid=$(sudo blkid -s PARTUUID -o value "$boot_part")
+    root_partuuid=$(sudo blkid -s PARTUUID -o value "$root_part")
+  fi
+
+  echo "Pointing the copy at its own partitions"
+  if [[ $dry_run == true ]]; then
+    echo "  cmdline.txt would become:"
+    cmdline_with_root "$root_partuuid" <"$boot_mount/cmdline.txt" | sed 's/^/    /'
+    echo "  /etc/fstab would become:"
+    fstab_with_partitions "$boot_mount" "$boot_partuuid" "$root_partuuid" </etc/fstab | sed 's/^/    /'
+    echo "  config.txt would gain:"
+    # diff exits 1 when the files differ, which is the expected case here.
+    diff <(cat "$boot_mount/config.txt") <(config_with_pcie "$gen3" <"$boot_mount/config.txt") | sed -n 's/^> /    /p' || true
+  else
+    rewrite_file "$mount_dir$boot_mount/cmdline.txt" cmdline_with_root "$root_partuuid"
+    rewrite_file "$mount_dir/etc/fstab" fstab_with_partitions "$boot_mount" "$boot_partuuid" "$root_partuuid"
+    rewrite_file "$mount_dir$boot_mount/config.txt" config_with_pcie "$gen3"
+  fi
+
+  cleanup
+
+  echo
+  echo "Bootloader"
+  local eeprom_current eeprom_new eeprom_file
+  eeprom_current=$(rpi-eeprom-config 2>/dev/null || sudo rpi-eeprom-config)
+  eeprom_new=$(eeprom_with_nvme_first <<<"$eeprom_current")
+
+  if [[ $eeprom_current == "$eeprom_new" ]]; then
+    echo "  Already tries NVMe first."
+  else
+    diff <(echo "$eeprom_current") <(echo "$eeprom_new") | sed -n 's/^< /  - /p; s/^> /  + /p' || true
+    if [[ $dry_run == true ]]; then
+      echo "  would run: sudo rpi-eeprom-config --apply <the config above>"
+    elif gum confirm "Update the bootloader to try NVMe first?"; then
+      eeprom_file=$(mktemp)
+      echo "$eeprom_new" >"$eeprom_file"
+      sudo rpi-eeprom-config --apply "$eeprom_file"
+      rm -f "$eeprom_file"
+    else
+      echo "  Skipped. Until BOOT_ORDER tries NVMe first, the Pi boots from $root_source while it is inserted."
+    fi
+  fi
+
+  echo
+  if [[ $dry_run == true ]]; then
+    echo "Dry run complete."
+  else
+    echo "Done. Reboot, then check that / now comes from NVMe:"
+    echo "  findmnt /"
+    echo "If the copy does not boot, the Pi falls back to $root_source."
+  fi
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi
